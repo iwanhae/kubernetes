@@ -114,16 +114,19 @@ cluster's shared state through which all other components interact.`,
 		// stop printing usage when the command errors
 		SilenceUsage: true,
 		PersistentPreRunE: func(*cobra.Command, []string) error {
-			// silence client-go warnings.
-			// kube-apiserver loopback clients should not log self-issued warnings.
+			// @이완해: WarningHandler (interface) 를 dummy 로 넣는 방식으로 작동
+			// 다만 client-go 쪽에서 실질적으로 warning 을 내보내는 코드는 존재하지 않음
+			// 아마 레거시 코드?
 			rest.SetDefaultWarningHandler(rest.NoWarnings{})
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// @이완해: hack/lib/version.sh - kube::version::ldflags 에서 버전 명시
 			verflag.PrintAndExitIfRequested()
 			fs := cmd.Flags()
 			cliflag.PrintFlags(fs)
 
+			// @이완해: 1.24 에서 제거 예정 (1.24 부터 insecure port 지원 x)
 			err := checkNonZeroInsecurePort(fs)
 			if err != nil {
 				return err
@@ -180,42 +183,55 @@ func Run(completeOptions completedServerRunOptions, stopCh <-chan struct{}) erro
 	// To help debugging, immediately log version
 	klog.Infof("Version: %+v", version.Get())
 
+	// @이완해: handler 로직 설정
 	server, err := CreateServerChain(completeOptions, stopCh)
 	if err != nil {
 		return err
 	}
 
+	// @이완해: healthz, livez, OpenAPI Spec 등의 handler 설정
 	prepared, err := server.PrepareRun()
 	if err != nil {
 		return err
 	}
 
+	// @이완해: 서버 실행 (blocking)
 	return prepared.Run(stopCh)
 }
 
 // CreateServerChain creates the apiservers connected via delegation.
 func CreateServerChain(completedOptions completedServerRunOptions, stopCh <-chan struct{}) (*aggregatorapiserver.APIAggregator, error) {
+	// @이완해: 곧 deprecated. https://kubernetes.io/docs/concepts/architecture/control-plane-node-communication/#ssh-tunnels
+	// 대체물: https://github.com/kubernetes/enhancements/tree/master/keps/sig-api-machinery/1281-network-proxy#goals
 	nodeTunneler, proxyTransport, err := CreateNodeDialer(completedOptions)
 	if err != nil {
 		return nil, err
 	}
 
+	// @이완해
+	// kubeAPIServerConfig : general configs
+	// serviceResolver     : Namespace/Name:Port -> url.URL
+	// pluginInitializer   : Admission Webhooks
 	kubeAPIServerConfig, serviceResolver, pluginInitializer, err := CreateKubeAPIServerConfig(completedOptions, nodeTunneler, proxyTransport)
 	if err != nil {
 		return nil, err
 	}
 
+	// @이완해: 분석필요
 	// If additional API servers are added, they should be gated.
 	apiExtensionsConfig, err := createAPIExtensionsConfig(*kubeAPIServerConfig.GenericConfig, kubeAPIServerConfig.ExtraConfig.VersionedInformers, pluginInitializer, completedOptions.ServerRunOptions, completedOptions.MasterCount,
 		serviceResolver, webhook.NewDefaultAuthenticationInfoResolverWrapper(proxyTransport, kubeAPIServerConfig.GenericConfig.EgressSelector, kubeAPIServerConfig.GenericConfig.LoopbackClientConfig))
 	if err != nil {
 		return nil, err
 	}
+
+	// @이완해 [importnant] : First Chain
 	apiExtensionsServer, err := createAPIExtensionsServer(apiExtensionsConfig, genericapiserver.NewEmptyDelegate())
 	if err != nil {
 		return nil, err
 	}
 
+	// @이완해 [importnant] : Second Chain
 	kubeAPIServer, err := CreateKubeAPIServer(kubeAPIServerConfig, apiExtensionsServer.GenericAPIServer)
 	if err != nil {
 		return nil, err
@@ -226,6 +242,7 @@ func CreateServerChain(completedOptions completedServerRunOptions, stopCh <-chan
 	if err != nil {
 		return nil, err
 	}
+	// @이완해 [importnant] : Third Chain
 	aggregatorServer, err := createAggregatorServer(aggregatorConfig, kubeAPIServer.GenericAPIServer, apiExtensionsServer.Informers)
 	if err != nil {
 		// we don't need special handling for innerStopCh because the aggregator server doesn't create any go routines
@@ -612,6 +629,10 @@ func Complete(s *options.ServerRunOptions) (completedServerRunOptions, error) {
 	s.PrimaryServiceClusterIPRange = primaryServiceIPRange
 	s.SecondaryServiceClusterIPRange = secondaryServiceIPRange
 
+	// @이완해: Self Signed Certificate 사용
+	// CN: Advertise Address
+	// SAN: []string{"kubernetes.default.svc", "kubernetes.default", "kubernetes"}, []net.IP{apiServerServiceIP{}
+	// 세부적인 내용은 확인이 필요하지만 k3s 의 경우 접속이력이 있는 모든 Host Name 을 실시간으로 SAN 에다가 넣어주고 있는데 이게 k3s 추가기능인지 kubernetes 도 동일한지는 확인 필요
 	if err := s.SecureServing.MaybeDefaultWithSelfSignedCerts(s.GenericServerRunOptions.AdvertiseAddress.String(), []string{"kubernetes.default.svc", "kubernetes.default", "kubernetes"}, []net.IP{apiServerServiceIP}); err != nil {
 		return options, fmt.Errorf("error creating self-signed certificates: %v", err)
 	}
@@ -629,6 +650,7 @@ func Complete(s *options.ServerRunOptions) (completedServerRunOptions, error) {
 		klog.Infof("external host was not specified, using %v", s.GenericServerRunOptions.ExternalHost)
 	}
 
+	// @이완해: Admission Webhook
 	s.Authentication.ApplyAuthorization(s.Authorization)
 
 	// Use (ServiceAccountSigningKeyFile != "") as a proxy to the user enabling

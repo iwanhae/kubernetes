@@ -32,6 +32,7 @@ import (
 	"k8s.io/kubernetes/cmd/kube-apiserver/app"
 )
 
+// @이완해: 시작
 func main() {
 	rand.Seed(time.Now().UnixNano())
 
